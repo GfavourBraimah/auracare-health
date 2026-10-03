@@ -1,0 +1,128 @@
+# AuraCare Health - local development environment.
+#
+# Spins up a local PostgreSQL container, the three backend microservices,
+# and the frontend, all wired together for local testing. Every piece of
+# configuration (DB credentials, ports) comes from the root `.env` file
+# (copy `.env.example` to `.env` before running `docker compose up`).
+#
+# This file is for LOCAL DEVELOPMENT / TESTING ONLY. It is not a
+# production deployment manifest: there is no TLS, no secrets manager
+# integration, and the exposed ports are for local convenience.
+#
+# NOTE: no services here publish ports to the host by default except
+# `frontend` and `postgres`, so the backend APIs are reachable from your
+# host machine for debugging (e.g. http://localhost:8001/api/patients/health)
+# while still being reachable from the frontend container via the
+# internal `auracare-network` using their service names.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: auracare-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${PATIENT_DB_NAME}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18+ images store data in a version-specific subdirectory
+      # under /var/lib/postgresql (not directly in /var/lib/postgresql/data
+      # as older images did), to support pg_ctlcluster-style upgrades.
+      # Mount the parent directory, not .../data, or the entrypoint will
+      # refuse to start. See https://github.com/docker-library/postgres/pull/1259
+      - postgres-data:/var/lib/postgresql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Explicitly target the always-present "postgres" maintenance DB.
+      # Without -d, pg_isready defaults to a DB named after the OS user
+      # running the check inside the container, which does not exist here,
+      # causing the healthcheck to fail even though the server is up.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - auracare-network
+
+  patient-service:
+    build:
+      context: ./services/patient-service
+      dockerfile: Dockerfile
+    container_name: auracare-patient-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${PATIENT_DB_NAME}
+    ports:
+      - "${PATIENT_SERVICE_PORT:-8001}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - auracare-network
+
+  appointment-service:
+    build:
+      context: ./services/appointment-service
+      dockerfile: Dockerfile
+    container_name: auracare-appointment-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${APPOINTMENT_DB_NAME}
+      # (node-postgres `pg` has no driver-selection ambiguity, so no
+      # +psycopg2 suffix is needed here - that's a SQLAlchemy-only concern.)
+      PORT: 3000
+      # Used to verify patient_id exists before booking an appointment.
+      PATIENT_SERVICE_URL: http://patient-service:8000
+    ports:
+      - "${APPOINTMENT_SERVICE_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      patient-service:
+        condition: service_started
+    networks:
+      - auracare-network
+
+  billing-service:
+    build:
+      context: ./services/billing-service
+      dockerfile: Dockerfile
+    container_name: auracare-billing-service
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${BILLING_DB_NAME}
+      # Used to verify patient_id exists before creating an invoice.
+      PATIENT_SERVICE_URL: http://patient-service:8000
+    ports:
+      - "${BILLING_SERVICE_PORT:-8002}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      patient-service:
+        condition: service_started
+    networks:
+      - auracare-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: auracare-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-80}:8080"
+    depends_on:
+      - patient-service
+      - appointment-service
+      - billing-service
+    networks:
+      - auracare-network
+
+networks:
+  auracare-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
