@@ -8,7 +8,8 @@ Unlike basic Docker hosting projects, this deployment requires path-based routin
 
 ## Table of Contents
 
-- [Architecture Diagram](#architecture-diagram)
+- [Architecture Diagram] ![AuraCare Health architecture diagram](./images/Aura.jpg)
+
 - [Company Brief](#company-brief)
 - [Company Overview & The Problem](#company-overview--the-problem)
 - [Project Objectives](#project-objectives)
